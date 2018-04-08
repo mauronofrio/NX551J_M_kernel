@@ -2281,6 +2281,92 @@ static int msm_pcm_get_out_chs(struct snd_kcontrol *kcontrol,
 	if (fe_id >= MSM_FRONTEND_DAI_MM_SIZE) {
 		pr_err("%s: invalid FE %d\n", __func__, fe_id);
 		return -EINVAL;
+	mutex_lock(&routing_lock);
+	switch (ucontrol->value.integer.value[0]) {
+	case 0:
+		msm_route_ec_ref_rx = 0;
+		ec_ref_port_id = AFE_PORT_INVALID;
+		break;
+	case 1:
+		msm_route_ec_ref_rx = 1;
+		ec_ref_port_id = SLIMBUS_0_RX;
+		break;
+	case 2:
+		msm_route_ec_ref_rx = 2;
+		ec_ref_port_id = AFE_PORT_ID_PRIMARY_MI2S_RX;
+		break;
+	case 3:
+		msm_route_ec_ref_rx = 3;
+		ec_ref_port_id = AFE_PORT_ID_PRIMARY_MI2S_TX;
+		break;
+	case 4:
+		msm_route_ec_ref_rx = 4;
+		ec_ref_port_id = AFE_PORT_ID_SECONDARY_MI2S_TX;
+		break;
+	case 5:
+		msm_route_ec_ref_rx = 5;
+		ec_ref_port_id = AFE_PORT_ID_TERTIARY_MI2S_TX;
+		break;
+	case 6:
+		msm_route_ec_ref_rx = 6;
+		ec_ref_port_id = AFE_PORT_ID_QUATERNARY_MI2S_TX;
+		break;
+	case 7:
+		msm_route_ec_ref_rx = 7;
+		ec_ref_port_id = AFE_PORT_ID_SECONDARY_MI2S_RX;
+		break;
+	case 9:
+		msm_route_ec_ref_rx = 9;
+		ec_ref_port_id = SLIMBUS_5_RX;
+		break;
+	case 10:
+		msm_route_ec_ref_rx = 10;
+		ec_ref_port_id = SLIMBUS_1_TX;
+		break;
+	case 11:
+		msm_route_ec_ref_rx = 11;
+		ec_ref_port_id = AFE_PORT_ID_QUATERNARY_TDM_TX_1;
+		break;
+	case 12:
+		msm_route_ec_ref_rx = 12;
+		ec_ref_port_id = AFE_PORT_ID_QUATERNARY_TDM_RX;
+		break;
+	case 13:
+		msm_route_ec_ref_rx = 13;
+		ec_ref_port_id = AFE_PORT_ID_QUATERNARY_TDM_RX_1;
+		break;
+	case 14:
+		msm_route_ec_ref_rx = 14;
+		ec_ref_port_id = AFE_PORT_ID_QUATERNARY_TDM_RX_2;
+		break;
+	case 15:
+		msm_route_ec_ref_rx = 15;
+		ec_ref_port_id = SLIMBUS_6_RX;
+		break;
+	case 16:
+		msm_route_ec_ref_rx = 16;
+		ec_ref_port_id = AFE_PORT_ID_TERTIARY_MI2S_RX;
+		break;
+	case 17:
+		msm_route_ec_ref_rx = 17;
+		ec_ref_port_id = AFE_PORT_ID_QUATERNARY_MI2S_RX;
+		break;
+	case 18:
+		msm_route_ec_ref_rx = 18;
+		ec_ref_port_id = AFE_PORT_ID_TERTIARY_TDM_TX;
+		break;
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	case 19:
+		msm_route_ec_ref_rx = 19;
+		ec_ref_port_id = AFE_PORT_ID_QUINARY_MI2S_TX;
+		break;
+	#endif
+	default:
+		msm_route_ec_ref_rx = 0; /* NONE */
+		pr_err("%s EC ref rx %ld not valid\n",
+			__func__, ucontrol->value.integer.value[0]);
+		ec_ref_port_id = AFE_PORT_INVALID;
+		break;
 	}
 
 	ucontrol->value.integer.value[0] =
@@ -2292,6 +2378,16 @@ static int msm_pcm_put_out_chs(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
 	u16 fe_id = 0;
+static const char *const ec_ref_rx[] = { "None", "SLIM_RX", "I2S_RX",
+	"PRI_MI2S_TX", "SEC_MI2S_TX",
+	"TERT_MI2S_TX", "QUAT_MI2S_TX", "SEC_I2S_RX", "PROXY_RX",
+	"SLIM_5_RX", "SLIM_1_TX", "QUAT_TDM_TX_1",
+	"QUAT_TDM_RX_0", "QUAT_TDM_RX_1", "QUAT_TDM_RX_2", "SLIM_6_RX",
+    #ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	"TERT_MI2S_RX", "QUAT_MI2S_RX", "TERT_TDM_TX_0", "QUIN_MI2S_TX"};
+	#else
+	"TERT_MI2S_RX", "QUAT_MI2S_RX", "TERT_TDM_TX_0"};
+	#endif
 
 	fe_id = ((struct soc_multi_mixer_control *)
 			kcontrol->private_value)->shift;
@@ -2525,6 +2621,13 @@ static int msm_pcm_channel_weight_put(struct snd_kcontrol *kcontrol,
 		pr_err("%s: invalid input channel %d\n", __func__, out_ch);
 		return -EINVAL;
 	}
+static const char * const ext_ec_ref_rx[] = {"NONE", "PRI_MI2S_TX",
+					     "SEC_MI2S_TX", "TERT_MI2S_TX",
+					     #ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+					     "QUAT_MI2S_TX", "SLIM_1_TX","QUIN_MI2S_TX"};
+						 #else
+						 "QUAT_MI2S_TX", "SLIM_1_TX"};
+						 #endif
 
 	pr_debug("%s: FE_ID: %d, channel weight %ld, %ld, %ld, %ld, %ld, %ld, %ld, %ld\n",
 		__func__, fe_id,
@@ -12097,6 +12200,9 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"VOC_EXT_EC MUX", "SEC_MI2S_TX" , "SEC_MI2S_TX"},
 	{"VOC_EXT_EC MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"VOC_EXT_EC MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	{"VOC_EXT_EC MUX", "QUIN_MI2S_TX" , "QUIN_MI2S_TX"},
+	#endif
 	{"VOC_EXT_EC MUX", "SLIM_1_TX" ,    "SLIMBUS_1_TX"},
 	{"CS-VOICE_UL1", NULL, "VOC_EXT_EC MUX"},
 	{"VOIP_UL", NULL, "VOC_EXT_EC MUX"},
@@ -12110,6 +12216,9 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"AUDIO_REF_EC_UL1 MUX", "SEC_MI2S_TX" , "SEC_MI2S_TX"},
 	{"AUDIO_REF_EC_UL1 MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL1 MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	{"AUDIO_REF_EC_UL1 MUX", "QUIN_MI2S_TX" , "QUIN_MI2S_TX"},
+	#endif
 	{"AUDIO_REF_EC_UL1 MUX", "SLIM_1_TX" , "SLIMBUS_1_TX"},
 	{"AUDIO_REF_EC_UL1 MUX", "QUAT_TDM_TX_1" , "QUAT_TDM_TX_1"},
 	{"AUDIO_REF_EC_UL1 MUX", "QUAT_TDM_RX_0" , "QUAT_TDM_RX_0"},
@@ -12127,30 +12236,47 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"AUDIO_REF_EC_UL3 MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL3 MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
 
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	{"AUDIO_REF_EC_UL2 MUX", "QUIN_MI2S_TX" , "QUIN_MI2S_TX"},
+    #endif
 	{"AUDIO_REF_EC_UL4 MUX", "PRI_MI2S_TX" , "PRI_MI2S_TX"},
 	{"AUDIO_REF_EC_UL4 MUX", "SEC_MI2S_TX" , "SEC_MI2S_TX"},
 	{"AUDIO_REF_EC_UL4 MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL4 MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
-
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	{"AUDIO_REF_EC_UL4 MUX", "QUIN_MI2S_TX" , "QUIN_MI2S_TX"},
+    #endif
 	{"AUDIO_REF_EC_UL5 MUX", "PRI_MI2S_TX" , "PRI_MI2S_TX"},
 	{"AUDIO_REF_EC_UL5 MUX", "SEC_MI2S_TX" , "SEC_MI2S_TX"},
 	{"AUDIO_REF_EC_UL5 MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL5 MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	{"AUDIO_REF_EC_UL5 MUX", "QUIN_MI2S_TX" , "QUIN_MI2S_TX"},
+	#endif
 
 	{"AUDIO_REF_EC_UL6 MUX", "PRI_MI2S_TX" , "PRI_MI2S_TX"},
 	{"AUDIO_REF_EC_UL6 MUX", "SEC_MI2S_TX" , "SEC_MI2S_TX"},
 	{"AUDIO_REF_EC_UL6 MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL6 MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	{"AUDIO_REF_EC_UL6 MUX", "QUIN_MI2S_TX" , "QUIN_MI2S_TX"},
+	#endif
 
 	{"AUDIO_REF_EC_UL8 MUX", "PRI_MI2S_TX" , "PRI_MI2S_TX"},
 	{"AUDIO_REF_EC_UL8 MUX", "SEC_MI2S_TX" , "SEC_MI2S_TX"},
 	{"AUDIO_REF_EC_UL8 MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL8 MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	{"AUDIO_REF_EC_UL8 MUX", "QUIN_MI2S_TX" , "QUIN_MI2S_TX"},
+	#endif
 
 	{"AUDIO_REF_EC_UL9 MUX", "PRI_MI2S_TX" , "PRI_MI2S_TX"},
 	{"AUDIO_REF_EC_UL9 MUX", "SEC_MI2S_TX" , "SEC_MI2S_TX"},
 	{"AUDIO_REF_EC_UL9 MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL9 MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
+	#ifdef CONFIG_SND_SOC_TAS2555_GENERIC
+	{"AUDIO_REF_EC_UL9 MUX", "QUIN_MI2S_TX" , "QUIN_MI2S_TX"},
+	#endif
 
 	{"AUDIO_REF_EC_UL17 MUX", "PRI_MI2S_TX" , "PRI_MI2S_TX"},
 	{"AUDIO_REF_EC_UL17 MUX", "SEC_MI2S_TX" , "SEC_MI2S_TX"},

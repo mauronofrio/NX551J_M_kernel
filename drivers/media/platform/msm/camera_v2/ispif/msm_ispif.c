@@ -1166,6 +1166,10 @@ static int msm_ispif_stop_immediately(struct ispif_device *ispif,
 		}
 	}
 
+#ifndef CONFIG_AL3200
+	rc = msm_ispif_reset_hw(ispif);
+#endif
+
 	return rc;
 }
 

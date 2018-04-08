@@ -3606,24 +3606,17 @@ int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg)
 		}
 	}
 
-	switch (update_cmd->update_type) {
-	case ENABLE_STREAM_BUF_DIVERT:
-		for (i = 0; i < update_cmd->num_streams; i++) {
-			update_info =
-				(struct msm_vfe_axi_stream_cfg_update_info *)
-				&update_cmd->update_info[i];
-			stream_info = &axi_data->stream_info[HANDLE_TO_IDX(
-				update_info->stream_handle)];
+    // ZTEMT: fuyipeng modify for framedrop of HDR -----start
+	for (i = 0; i < update_cmd->num_streams; i++) {
+		update_info = &update_cmd->update_info[i];
+		stream_info = &axi_data->stream_info[
+				HANDLE_TO_IDX(update_info->stream_handle)];
+
+		switch (update_cmd->update_type) {
+		case ENABLE_STREAM_BUF_DIVERT:
 			stream_info->buf_divert = 1;
-		}
-		break;
-	case DISABLE_STREAM_BUF_DIVERT:
-		for (i = 0; i < update_cmd->num_streams; i++) {
-			update_info =
-				(struct msm_vfe_axi_stream_cfg_update_info *)
-				&update_cmd->update_info[i];
-			stream_info = &axi_data->stream_info[HANDLE_TO_IDX(
-				update_info->stream_handle)];
+			break;
+		case DISABLE_STREAM_BUF_DIVERT:
 			stream_info->buf_divert = 0;
 			msm_isp_get_timestamp(&timestamp, vfe_dev);
 			frame_id = vfe_dev->axi_data.src_info[
@@ -3645,18 +3638,11 @@ int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg)
 					ISP_EVENT_BUF_FATAL_ERROR);
 				return rc;
 			}
-		}
-		break;
-	case UPDATE_STREAM_FRAMEDROP_PATTERN: {
-		for (i = 0; i < update_cmd->num_streams; i++) {
+			break;
+		case UPDATE_STREAM_FRAMEDROP_PATTERN: {
 			uint32_t framedrop_period =
 				msm_isp_get_framedrop_period(
-					update_info->skip_pattern);
-			update_info =
-				(struct msm_vfe_axi_stream_cfg_update_info *)
-				&update_cmd->update_info[i];
-			stream_info = &axi_data->stream_info[HANDLE_TO_IDX(
-				update_info->stream_handle)];
+				   update_info->skip_pattern);
 			spin_lock_irqsave(&stream_info->lock, flags);
 			/* no change then break early */
 			if (stream_info->current_framedrop_period ==
@@ -3680,16 +3666,9 @@ int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg)
 			if (stream_info->stream_type != BURST_STREAM)
 				msm_isp_cfg_framedrop_reg(vfe_dev, stream_info);
 			spin_unlock_irqrestore(&stream_info->lock, flags);
+			break;
 		}
-		break;
-	}
-	case UPDATE_STREAM_SW_FRAME_DROP: {
-		for (i = 0; i < update_cmd->num_streams; i++) {
-			update_info =
-				(struct msm_vfe_axi_stream_cfg_update_info *)
-				&update_cmd->update_info[i];
-			stream_info = &axi_data->stream_info[HANDLE_TO_IDX(
-				update_info->stream_handle)];
+		case UPDATE_STREAM_SW_FRAME_DROP: {
 			sw_skip_info = &update_info->sw_skip_info;
 			if (sw_skip_info->stream_src_mask != 0) {
 				/* SW image buffer drop */
@@ -3704,22 +3683,14 @@ int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg)
 				spin_unlock_irqrestore(&stream_info->lock,
 					flags);
 			}
+			break;
 		}
-		break;
-	}
-	case UPDATE_STREAM_AXI_CONFIG: {
-		for (i = 0; i < update_cmd->num_streams; i++) {
-			update_info =
-				(struct msm_vfe_axi_stream_cfg_update_info *)
-				&update_cmd->update_info[i];
-			stream_info = &axi_data->stream_info[HANDLE_TO_IDX(
-				update_info->stream_handle)];
+		case UPDATE_STREAM_AXI_CONFIG: {
 			for (j = 0; j < stream_info->num_planes; j++) {
 				stream_info->plane_cfg[j] =
 					update_info->plane_cfg[j];
 			}
-			stream_info->output_format =
-				update_info->output_format;
+			stream_info->output_format = update_info->output_format;
 			if ((stream_info->state == ACTIVE) &&
 				((vfe_dev->hw_info->runtime_axi_update == 0) ||
 				(vfe_dev->dual_vfe_enable == 1)))  {
@@ -3754,6 +3725,7 @@ int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg)
 				spin_unlock_irqrestore(&stream_info->lock,
 					flags);
 			}
+			break;
 		}
 		break;
 	}
@@ -3773,30 +3745,16 @@ int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg)
 			if (rc)
 				pr_err("%s failed to request frame!\n",
 					__func__);
+			break;
 		}
-		break;
-	}
-	case UPDATE_STREAM_ADD_BUFQ: {
-		for (i = 0; i < update_cmd->num_streams; i++) {
-			update_info =
-				(struct msm_vfe_axi_stream_cfg_update_info *)
-				&update_cmd->update_info[i];
-			stream_info = &axi_data->stream_info[HANDLE_TO_IDX(
-				update_info->stream_handle)];
+		case UPDATE_STREAM_ADD_BUFQ: {
 			rc = msm_isp_add_buf_queue(vfe_dev, stream_info,
 				update_info->user_stream_id);
 			if (rc)
 				pr_err("%s failed to add bufq!\n", __func__);
+			break;
 		}
-		break;
-	}
-	case UPDATE_STREAM_REMOVE_BUFQ: {
-		for (i = 0; i < update_cmd->num_streams; i++) {
-			update_info =
-				(struct msm_vfe_axi_stream_cfg_update_info *)
-				&update_cmd->update_info[i];
-			stream_info = &axi_data->stream_info[HANDLE_TO_IDX(
-				update_info->stream_handle)];
+		case UPDATE_STREAM_REMOVE_BUFQ: {
 			msm_isp_remove_buf_queue(vfe_dev, stream_info,
 				update_info->user_stream_id);
 			pr_debug("%s, Remove bufq for Stream 0x%x\n",
@@ -3810,26 +3768,13 @@ int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg)
 					pr_err("%s: wait for update failed\n",
 						__func__);
 			}
+
+			break;
 		}
-		break;
-	}
-	case UPDATE_STREAM_OFFLINE_AXI_CONFIG: {
-		for (i = 0; i < update_cmd->num_streams; i++) {
-			update_info =
-				(struct msm_vfe_axi_stream_cfg_update_info *)
-				&update_cmd->update_info[i];
-			stream_info = &axi_data->stream_info[HANDLE_TO_IDX(
-				update_info->stream_handle)];
-			for (j = 0; j < stream_info->num_planes; j++) {
-				stream_info->plane_cfg[j] =
-					update_info->plane_cfg[j];
-			}
-			for (j = 0; j < stream_info->num_planes; j++) {
-				vfe_dev->hw_info->vfe_ops.axi_ops.
-					cfg_wm_reg(vfe_dev, stream_info, j);
-			}
+		default:
+			pr_err("%s: Invalid update type\n", __func__);
+			return -EINVAL;
 		}
-		break;
 	}
 	case UPDATE_STREAM_REQUEST_FRAMES_VER2: {
 		struct msm_vfe_axi_stream_cfg_update_info_req_frm *req_frm =
