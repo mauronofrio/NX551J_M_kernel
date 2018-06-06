@@ -51,6 +51,9 @@
 #include "dbm.h"
 #include "debug.h"
 #include "xhci.h"
+#ifdef CONFIG_NUBIA_WEIPU_CHARGER
+#include <../../power/nubia_weipu_charger.h>
+#endif
 
 #define DWC3_IDEV_CHG_MAX 1500
 #define DWC3_HVDCP_CHG_MAX 1800
@@ -270,6 +273,11 @@ struct dwc3_msm {
 	atomic_t                in_p3;
 	unsigned int		lpm_to_suspend_delay;
 	bool			init;
+#ifdef CONFIG_ZTEMT_CHARGER
+    struct hrtimer  chg_hrtimer;
+	struct hrtimer	clear_hrtimer;
+	bool			delay_flags;
+#endif
 
 	u32                     pm_qos_latency;
 	struct pm_qos_request   pm_qos_req_dma;
@@ -930,7 +938,7 @@ static void gsi_store_ringbase_dbl_info(struct usb_ep *ep, u32 dbl_addr)
 }
 
 /*
-* Rings Doorbell for GSI Channel
+* Rings Doorbell for IN GSI Channel
 *
 * @usb_ep - pointer to usb_ep instance.
 * @request - pointer to GSI request. This is used to pass in the
@@ -944,6 +952,7 @@ static void gsi_ring_db(struct usb_ep *ep, struct usb_gsi_request *request)
 	u64 dbl_addr = *((u64 *)request->buf_base_addr);
 	u32 dbl_lo_addr = (dbl_addr & 0xFFFFFFFF);
 	u32 dbl_hi_addr = (dbl_addr >> 32);
+	u32 num_trbs = (request->num_bufs * 2 + 2);
 	struct dwc3_ep *dep = to_dwc3_ep(ep);
 	struct dwc3	*dwc = dep->dwc;
 	struct dwc3_msm *mdwc = dev_get_drvdata(dwc->dev->parent);
@@ -1856,6 +1865,10 @@ static void dwc3_msm_notify_event(struct dwc3 *dwc, unsigned event,
 					PWR_EVNT_LPM_OUT_L1_MASK, 1);
 
 		atomic_set(&dwc->in_lpm, 0);
+#ifdef CONFIG_ZTEMT_CHARGER
+		pr_err("%s():cancel HRTIMER\n",__func__);
+		hrtimer_cancel(&mdwc->chg_hrtimer);
+#endif
 		break;
 	case DWC3_CONTROLLER_NOTIFY_OTG_EVENT:
 		dev_dbg(mdwc->dev, "DWC3_CONTROLLER_NOTIFY_OTG_EVENT received\n");
@@ -2103,6 +2116,7 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 	can_suspend_ssphy = !(mdwc->in_host_mode &&
 				dwc3_msm_is_host_superspeed(mdwc));
 
+	tasklet_kill(&dwc->bh);
 	/* Disable core irq */
 	if (dwc->irq)
 		disable_irq(dwc->irq);
@@ -2154,6 +2168,11 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 
 	cancel_delayed_work_sync(&mdwc->perf_vote_work);
 	dwc3_msm_perf_vote_update(mdwc, DWC3_PERF_OFF);
+	/* Remove bus voting */
+	if (mdwc->bus_perf_client) {
+		mdwc->bus_vote = 0;
+		schedule_work(&mdwc->bus_vote_w);
+	}
 
 	/*
 	 * release wakeup source with timeout to defer system suspend to
@@ -2206,6 +2225,12 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 	}
 
 	pm_stay_awake(mdwc->dev);
+
+	/* Enable bus voting */
+	if (mdwc->bus_perf_client) {
+		mdwc->bus_vote = 1;
+		schedule_work(&mdwc->bus_vote_w);
+	}
 
 	/* Vote for TCXO while waking up USB HSPHY */
 	ret = clk_prepare_enable(mdwc->xo_clk);
@@ -2337,6 +2362,10 @@ static void dwc3_ext_event_notify(struct dwc3_msm *mdwc)
 	} else {
 		dbg_event(0xFF, "BSV clear", 0);
 		clear_bit(B_SESS_VLD, &mdwc->inputs);
+#ifdef CONFIG_ZTEMT_CHARGER
+		pr_err("%s():cancel HRTIMER\n",__func__);
+		hrtimer_cancel(&mdwc->chg_hrtimer);
+#endif
 	}
 
 	if (mdwc->suspend) {
@@ -2490,6 +2519,9 @@ static irqreturn_t msm_dwc3_pwr_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+#ifdef CONFIG_ZTEMT_CHARGER
+extern int get_prop_charger_voltage(void);
+#endif
 static int dwc3_msm_power_get_property_usb(struct power_supply *psy,
 				  enum power_supply_property psp,
 				  union power_supply_propval *val)
@@ -2507,10 +2539,24 @@ static int dwc3_msm_power_get_property_usb(struct power_supply *psy,
 		val->intval = mdwc->typec_current_max;
 		break;
 	case POWER_SUPPLY_PROP_PRESENT:
+		#ifdef CONFIG_NUBIA_WEIPU_CHARGER
+		if(is_wp_chg_present())
+			val->intval = 1;
+		else
+			val->intval = mdwc->vbus_active;
+		#else
 		val->intval = mdwc->vbus_active;
+		#endif
 		break;
 	case POWER_SUPPLY_PROP_ONLINE:
+		#ifdef CONFIG_NUBIA_WEIPU_CHARGER
+		if(is_wp_chg_present())
+			val->intval = 1;
+		else
+			val->intval = mdwc->online;
+		#else
 		val->intval = mdwc->online;
+		#endif
 		break;
 	case POWER_SUPPLY_PROP_REAL_TYPE:
 		val->intval = mdwc->usb_supply_type;
@@ -2524,6 +2570,11 @@ static int dwc3_msm_power_get_property_usb(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_USB_OTG:
 		val->intval = !mdwc->id_state;
 		break;
+	#ifdef CONFIG_ZTEMT_CHARGER
+    case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		val->intval = get_prop_charger_voltage() * 1000;
+		break;
+	#endif
 	default:
 		return -EINVAL;
 	}
@@ -2560,7 +2611,6 @@ static int dwc3_msm_power_set_property_usb(struct power_supply *psy,
 			pm_stay_awake(mdwc->dev);
 			queue_delayed_work(mdwc->dwc3_resume_wq,
 					&mdwc->resume_work, 0);
-		}
 		break;
 	/* PMIC notification for DP_DM state */
 	case POWER_SUPPLY_PROP_DP_DM:
@@ -2593,6 +2643,10 @@ static int dwc3_msm_power_set_property_usb(struct power_supply *psy,
 
 		mdwc->vbus_active = val->intval;
 		if (dwc->is_drd && !mdwc->in_restart) {
+			/*
+			 * Set debouncing delay to 120ms. Otherwise battery
+			 * charging CDP complaince test fails if delay > 120ms.
+			 */
 			dbg_event(0xFF, "Q RW (vbus)", val->intval);
 			dbg_event(0xFF, "stayVbus", 0);
 			/* Ignore !vbus on stop_host */
@@ -2642,6 +2696,16 @@ static int dwc3_msm_power_set_property_usb(struct power_supply *psy,
 		case POWER_SUPPLY_TYPE_USB:
 			mdwc->chg_type = DWC3_SDP_CHARGER;
 			mdwc->voltage_max = MICRO_5V;
+#ifdef CONFIG_ZTEMT_CHARGER
+			if(mdwc->delay_flags){
+				pr_err("%s():start HRTIMER 10s.\n",__func__);
+				hrtimer_start(&mdwc->chg_hrtimer, ktime_set(10,0), HRTIMER_MODE_REL);
+			}
+			else {
+				pr_err("%s():start HRTIMER 2s.\n",__func__);
+				hrtimer_start(&mdwc->chg_hrtimer, ktime_set(2,0), HRTIMER_MODE_REL);
+			}
+#endif            
 			break;
 		case POWER_SUPPLY_TYPE_USB_DCP:
 			mdwc->chg_type = DWC3_DCP_CHARGER;
@@ -2715,6 +2779,9 @@ static enum power_supply_property dwc3_msm_pm_power_props_usb[] = {
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_USB_OTG,
 	POWER_SUPPLY_PROP_REAL_TYPE,
+	#ifdef CONFIG_ZTEMT_CHARGER
+    	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	#endif
 };
 
 static irqreturn_t dwc3_pmic_id_irq(int irq, void *data)
@@ -2851,6 +2918,29 @@ static int dwc3_msm_get_clk_gdsc(struct dwc3_msm *mdwc)
 
 	return 0;
 }
+
+#ifdef CONFIG_ZTEMT_CHARGER
+static enum hrtimer_restart chg_hrtimer_func(struct hrtimer *hrtimer)
+{
+	struct dwc3_msm *mdwc = container_of(hrtimer, struct dwc3_msm, chg_hrtimer);
+
+	pr_err("%s():Inside timer expired.\n",__func__);
+	pr_err("%s():Do floating charger update.\n",__func__);
+	dwc3_msm_gadget_vbus_draw(mdwc, 900);
+
+	return HRTIMER_NORESTART;
+}
+
+static enum hrtimer_restart clear_hrtimer_func(struct hrtimer *hrtimer)
+{
+	struct dwc3_msm *mdwc = container_of(hrtimer, struct dwc3_msm, clear_hrtimer);
+
+	pr_err("hrtimer expired, clear delay flags.\n");
+	mdwc->delay_flags = false;
+
+	return HRTIMER_NORESTART;
+}
+#endif
 
 static ssize_t mode_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
@@ -3291,6 +3381,13 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 
 	if (of_property_read_bool(node, "qcom,disable-dev-mode-pm"))
 		pm_runtime_get_noresume(mdwc->dev);
+#ifdef CONFIG_ZTEMT_CHARGER
+    mdwc->delay_flags = false;
+    hrtimer_init(&mdwc->chg_hrtimer,CLOCK_MONOTONIC,HRTIMER_MODE_ABS);
+    mdwc->chg_hrtimer.function = chg_hrtimer_func;
+    hrtimer_init(&mdwc->clear_hrtimer,CLOCK_MONOTONIC,HRTIMER_MODE_ABS);
+    mdwc->clear_hrtimer.function = clear_hrtimer_func;
+#endif
 
 	/* Update initial ID state */
 	if (mdwc->pmic_id_irq) {
@@ -3390,6 +3487,7 @@ static int dwc3_msm_remove(struct platform_device *pdev)
 	platform_device_put(mdwc->dwc3);
 	device_for_each_child(&pdev->dev, NULL, dwc3_msm_remove_children);
 
+	dbg_event(0xFF, "Remov put", 0);
 	pm_runtime_disable(mdwc->dev);
 	pm_runtime_barrier(mdwc->dev);
 	pm_runtime_put_sync(mdwc->dev);
@@ -3810,7 +3908,12 @@ skip_psy_type:
 
 	/* Override mA if type-c charger used (use hvdcp/bc1.2 if it is 500) */
 	if (mdwc->typec_current_max > 500 && mA < mdwc->typec_current_max)
-		mA = mdwc->typec_current_max;
+#ifdef CONFIG_ZTEMT_CHARGER	
+	   mA = 500;
+#else      
+	   mA = mdwc->typec_current_max;
+#endif
+		
 
 	if (mdwc->max_power == mA)
 		return 0;
@@ -3876,6 +3979,11 @@ static void dwc3_initialize(struct dwc3_msm *mdwc)
 
 	dbg_event(0xFF, "Initialized Start",
 			atomic_read(&mdwc->dev->power.usage_count));
+
+	if (mdwc->bus_perf_client) {
+		mdwc->bus_vote = 1;
+		schedule_work(&mdwc->bus_vote_w);
+	}
 
 	/* enable USB GDSC */
 	dwc3_msm_config_gdsc(mdwc, 1);
@@ -4020,6 +4128,11 @@ static void dwc3_msm_otg_sm_work(struct work_struct *w)
 			dbg_event(0xFF, "Undef NoUSB",
 				atomic_read(&mdwc->dev->power.usage_count));
 			mdwc->otg_state = OTG_STATE_B_IDLE;
+		#ifdef CONFIG_ZTEMT_CHARGER
+			pr_err("Start 5s timer to clear flags.\n");
+			hrtimer_start(&mdwc->clear_hrtimer, ktime_set(5,0), HRTIMER_MODE_REL);
+			mdwc->delay_flags = true;
+		#endif
 		}
 		break;
 

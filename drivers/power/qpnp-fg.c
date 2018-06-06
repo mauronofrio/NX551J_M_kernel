@@ -36,6 +36,42 @@
 #include <linux/alarmtimer.h>
 #include <linux/qpnp/qpnp-revid.h>
 
+
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+#include "nubia_fuelgauge_cntl.h"
+
+#define	SUMSUNG_BTAAERY_ID_MAX	500000 
+#define	SUMSUNG_BTAAERY_ID_MIN	400000 
+#define	ATL_BTAAERY_ID_MAX	20000 
+#define	ATL_BTAAERY_ID_MIN	10000 
+   #define	LG_BTAAERY_ID_MAX	250000 
+#define	LG_BTAAERY_ID_MIN	       120000 
+struct battery_id_map {
+	int id_max;
+	int id_min;
+	char *name;
+};
+
+bool b_powerOn_init = false;
+
+static const struct battery_id_map batt_id_map[] = {
+	{ATL_BTAAERY_ID_MAX,            ATL_BTAAERY_ID_MIN,            "ztemt_atl_2850mah"},
+	{SUMSUNG_BTAAERY_ID_MAX,        SUMSUNG_BTAAERY_ID_MIN,   "ztemt_sumsung_3000mah"},
+    {LG_BTAAERY_ID_MAX,             LG_BTAAERY_ID_MIN,              "ztemt_lg_3000mah"}
+};
+static int debug_mask_fg = 1;
+module_param_named(debug_mask_fg, debug_mask_fg, int, S_IRUSR | S_IWUSR);
+#define DBG_CHARGE(x...) do {if (debug_mask_fg) pr_info(">>ztemt_fg:>>  " x); } while (0)
+
+//Žò¿ªµ÷ÊÔœÓ¿Ú
+//#undef pr_debug
+//#define pr_debug   pr_info
+//#undef KERN_INFO
+//#define KERN_INFO KERN_ERR
+#endif
+
+
+
 /* Register offsets */
 
 /* Interrupt offsets */
@@ -315,7 +351,11 @@ module_param_named(
 	debug_mask, fg_debug_mask, int, S_IRUSR | S_IWUSR
 );
 
-static int fg_reset_on_lockup;
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+static int fg_reset_on_lockup = 1;  
+#else
+static int fg_reset_on_lockup; 
+#endif
 
 static int fg_sense_type = -EINVAL;
 static int fg_restart;
@@ -597,6 +637,11 @@ struct fg_chip {
 	bool			esr_extract_disabled;
 	bool			imptr_pulse_slow_en;
 	bool			esr_pulse_tune_en;
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	struct nubia_fg_cntl *batt_cntl;
+	int    chg_full_st;
+	char   use_batt_type[50];
+#endif
 	/* Slope limiter */
 	struct work_struct	slope_limiter_work;
 	struct fg_wakeup_source	slope_limit_wakeup_source;
@@ -707,6 +752,12 @@ static char *fg_supplicants[] = {
 	"bcl",
 	"fg_adc"
 };
+
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+static int ztemt_chg_batt_init(struct fg_chip *chip);
+static int fg_is_warm_reboot(struct fg_chip *chip);
+static int get_sram_prop_now(struct fg_chip *chip, unsigned int type);
+#endif
 
 #define DEBUG_PRINT_BUFFER_SIZE 64
 static void fill_string(char *str, size_t str_len, u8 *buf, int buf_len)
@@ -1233,6 +1284,9 @@ out:
 #define MEM_INTF_IMA_EXP_STS		0x55
 #define MEM_INTF_IMA_HW_STS		0x56
 #define MEM_INTF_IMA_BYTE_EN		0x60
+#define IMA_ADDR_STBL_ERR		BIT(7)
+#define IMA_WR_ACS_ERR			BIT(6)
+#define IMA_RD_ACS_ERR			BIT(5)
 #define IMA_IACS_CLR			BIT(2)
 #define IMA_IACS_RDY			BIT(1)
 static int fg_run_iacs_clear_sequence(struct fg_chip *chip)
@@ -1794,6 +1848,7 @@ retry:
 	if (rc) {
 		count++;
 		if ((rc == -EAGAIN) && (count < RETRY_COUNT)) {
+			count++;
 			pr_err("IMA access failed retry_count = %d\n", count);
 			goto retry;
 		} else {
@@ -1836,6 +1891,7 @@ out:
 	}
 
 	mutex_unlock(&chip->rw_lock);
+
 exit:
 	fg_relax(&chip->memif_wakeup_source);
 	return rc;
@@ -1888,6 +1944,7 @@ retry:
 	if (rc) {
 		count++;
 		if ((rc == -EAGAIN) && (count < RETRY_COUNT)) {
+			count++;
 			pr_err("IMA access failed retry_count = %d\n", count);
 			goto retry;
 		} else {
@@ -2028,7 +2085,11 @@ static void fg_handle_battery_insertion(struct fg_chip *chip)
 
 static int soc_to_setpoint(int soc)
 {
-	return DIV_ROUND_CLOSEST(soc * 255, 100);
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+    return soc;
+#else
+    return DIV_ROUND_CLOSEST(soc * 255, 100);
+#endif
 }
 
 static void batt_to_setpoint_adc(int vbatt_mv, u8 *data)
@@ -2246,6 +2307,9 @@ static int get_prop_capacity(struct fg_chip *chip)
 {
 	int msoc, rc;
 	bool vbatt_low_sts;
+	#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	int batt_vol = get_sram_prop_now(chip, FG_DATA_VOLTAGE)/1000;
+	#endif
 
 	if (chip->use_last_soc && chip->last_soc) {
 		if (chip->last_soc == FULL_SOC_RAW)
@@ -2259,18 +2323,31 @@ static int get_prop_capacity(struct fg_chip *chip)
 		return MISSING_CAPACITY;
 
 	if (!chip->profile_loaded && !chip->use_otp_profile)
-		return DEFAULT_CAPACITY;
-
+		return DEFAULT_CAPACITY; 
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+    if(chip->charge_full || chip->chg_full_st){
+		DBG_CHARGE("chging full and set soc to 100!\n");
+		return FULL_CAPACITY;
+	}
+#else
 	if (chip->charge_full)
 		return FULL_CAPACITY;
-
+#endif
+	#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	if (chip->soc_empty && batt_vol<3400) {
+		if (fg_debug_mask & FG_POWER_SUPPLY)
+			pr_info_ratelimited("capacity: %d, EMPTY\n",
+						EMPTY_CAPACITY);
+		return EMPTY_CAPACITY;
+	}
+	#else
 	if (chip->soc_empty) {
 		if (fg_debug_mask & FG_POWER_SUPPLY)
 			pr_info_ratelimited("capacity: %d, EMPTY\n",
 					EMPTY_CAPACITY);
 		return EMPTY_CAPACITY;
 	}
-
+	#endif
 	msoc = get_monotonic_soc_raw(chip);
 	if (msoc == 0) {
 		if (fg_reset_on_lockup && chip->use_vbat_low_empty_soc) {
@@ -3316,6 +3393,136 @@ static void battery_age_work(struct work_struct *work)
 	estimate_battery_age(chip, &chip->actual_cap_uah);
 }
 
+static enum power_supply_property fg_power_props[] = {
+	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_CAPACITY_RAW,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_VOLTAGE_OCV,
+	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
+	POWER_SUPPLY_PROP_CHARGE_NOW_RAW,
+	POWER_SUPPLY_PROP_CHARGE_NOW_ERROR,
+	POWER_SUPPLY_PROP_CHARGE_FULL,
+	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_COOL_TEMP,
+	POWER_SUPPLY_PROP_WARM_TEMP,
+	POWER_SUPPLY_PROP_RESISTANCE,
+	POWER_SUPPLY_PROP_RESISTANCE_ID,
+	POWER_SUPPLY_PROP_BATTERY_TYPE,
+	POWER_SUPPLY_PROP_UPDATE_NOW,
+	POWER_SUPPLY_PROP_ESR_COUNT,
+	POWER_SUPPLY_PROP_VOLTAGE_MIN,
+	POWER_SUPPLY_PROP_CYCLE_COUNT,
+	POWER_SUPPLY_PROP_CYCLE_COUNT_ID,
+	POWER_SUPPLY_PROP_HI_POWER,
+	POWER_SUPPLY_PROP_IGNORE_FALSE_NEGATIVE_ISENSE,
+	POWER_SUPPLY_PROP_ENABLE_JEITA_DETECTION,
+	POWER_SUPPLY_PROP_SOC_REPORTING_READY,
+};
+
+static int fg_power_get_property(struct power_supply *psy,
+				       enum power_supply_property psp,
+				       union power_supply_propval *val)
+{
+	struct fg_chip *chip = container_of(psy, struct fg_chip, bms_psy);
+	bool vbatt_low_sts;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_BATTERY_TYPE:
+		if (chip->battery_missing)
+			val->strval = missing_batt_type;
+		else if (chip->fg_restarting)
+			val->strval = loading_batt_type;
+		else
+			val->strval = chip->batt_type;
+		break;
+	case POWER_SUPPLY_PROP_CAPACITY:
+		val->intval = get_prop_capacity(chip);
+		break;
+	case POWER_SUPPLY_PROP_CAPACITY_RAW:
+		val->intval = get_sram_prop_now(chip, FG_DATA_BATT_SOC);
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_NOW_ERROR:
+		val->intval = get_sram_prop_now(chip, FG_DATA_VINT_ERR);
+		break;
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		val->intval = get_sram_prop_now(chip, FG_DATA_CURRENT);
+		break;
+	case POWER_SUPPLY_PROP_IGNORE_FALSE_NEGATIVE_ISENSE:
+		val->intval = !chip->allow_false_negative_isense;
+		break;
+	case POWER_SUPPLY_PROP_ENABLE_JEITA_DETECTION:
+		val->intval = chip->use_soft_jeita_irq;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		val->intval = get_sram_prop_now(chip, FG_DATA_VOLTAGE);
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
+		val->intval = get_sram_prop_now(chip, FG_DATA_OCV);
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
+		val->intval = chip->batt_max_voltage_uv;
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		val->intval = get_sram_prop_now(chip, FG_DATA_BATT_TEMP);
+		break;
+	case POWER_SUPPLY_PROP_COOL_TEMP:
+		val->intval = get_prop_jeita_temp(chip, FG_MEM_SOFT_COLD);
+		break;
+	case POWER_SUPPLY_PROP_WARM_TEMP:
+		val->intval = get_prop_jeita_temp(chip, FG_MEM_SOFT_HOT);
+		break;
+	case POWER_SUPPLY_PROP_RESISTANCE:
+		val->intval = get_sram_prop_now(chip, FG_DATA_BATT_ESR);
+		break;
+	case POWER_SUPPLY_PROP_ESR_COUNT:
+		val->intval = get_sram_prop_now(chip, FG_DATA_BATT_ESR_COUNT);
+		break;
+	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+		val->intval = fg_get_cycle_count(chip);
+		break;
+	case POWER_SUPPLY_PROP_CYCLE_COUNT_ID:
+		val->intval = chip->cyc_ctr.id;
+		break;
+	case POWER_SUPPLY_PROP_RESISTANCE_ID:
+		val->intval = get_sram_prop_now(chip, FG_DATA_BATT_ID);
+		break;
+	case POWER_SUPPLY_PROP_UPDATE_NOW:
+		val->intval = 0;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
+		if (!fg_get_vbatt_status(chip, &vbatt_low_sts))
+			val->intval = (int)vbatt_low_sts;
+		else
+			val->intval = 1;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+		val->intval = chip->nom_cap_uah;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+		val->intval = chip->learning_data.learned_cc_uah;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+		val->intval = chip->learning_data.cc_uah;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_NOW_RAW:
+		val->intval = get_sram_prop_now(chip, FG_DATA_CC_CHARGE);
+		break;
+	case POWER_SUPPLY_PROP_HI_POWER:
+		val->intval = !!chip->bcl_lpm_disabled;
+		break;
+	case POWER_SUPPLY_PROP_SOC_REPORTING_READY:
+		val->intval = !!chip->profile_loaded;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int correction_times[] = {
 	1470,
 	2940,
@@ -3498,6 +3705,8 @@ fail:
 
 #define CC_SOC_BASE_REG		0x5BC
 #define CC_SOC_OFFSET		3
+#define CC_SOC_MAGNITUDE_MASK	0x1FFFFFFF
+#define CC_SOC_NEGATIVE_BIT	BIT(29)
 static int fg_get_cc_soc(struct fg_chip *chip, int *cc_soc)
 {
 	int rc;
@@ -4769,6 +4978,16 @@ static int fg_power_set_property(struct power_supply *psy,
 		chip->status = val->intval;
 		schedule_work(&chip->status_change_work);
 		check_gain_compensation(chip);
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+       if(chip->status == POWER_SUPPLY_STATUS_FULL && get_prop_capacity(chip) >= 98){
+		    chip->chg_full_st = 1;
+	   }else if(chip->chg_full_st 
+		   && chip->status == POWER_SUPPLY_STATUS_CHARGING && get_prop_capacity(chip) >= 99){
+             chip->chg_full_st = 1;
+	   }else{
+	      chip->chg_full_st = 0;
+       }
+#endif		
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
 		chip->health = val->intval;
@@ -5550,6 +5769,7 @@ done:
 
 #define OCV_COEFFS_START_REG		0x4C0
 #define OCV_JUNCTION_REG		0x4D8
+#define NOM_CAP_REG			0x4F4
 #define CUTOFF_VOLTAGE_REG		0x40C
 #define RSLOW_CFG_REG			0x538
 #define RSLOW_CFG_OFFSET		2
@@ -5560,6 +5780,7 @@ done:
 #define RSLOW_COMP_REG			0x528
 #define RSLOW_COMP_C1_OFFSET		0
 #define RSLOW_COMP_C2_OFFSET		2
+#define CAPACITY_DELTA_DECIPCT		500
 #define BATT_PROFILE_OFFSET		0x4C0
 static void get_default_rslow_comp_settings(struct fg_chip *chip)
 {
@@ -5583,6 +5804,8 @@ static int populate_system_data(struct fg_chip *chip)
 {
 	u8 buffer[24];
 	int rc, i;
+	int16_t cc_mah;
+	int64_t delta_cc_uah, pct_nom_cap_uah;
 
 	fg_mem_lock(chip);
 	rc = fg_mem_read(chip, buffer, OCV_COEFFS_START_REG, 24, 0, 0);
@@ -5623,7 +5846,6 @@ static int populate_system_data(struct fg_chip *chip)
 		pr_err("Failed to read cutoff voltage: %d\n", rc);
 		goto done;
 	}
-
 	chip->cutoff_voltage = voltage_2b(buffer);
 	if (fg_debug_mask & FG_AGING)
 		pr_info("cutoff_voltage = %lld, nom_cap_uah = %d p1p2 = %d, p2p3 = %d\n",
@@ -5858,6 +6080,28 @@ static void update_cc_cv_setpoint(struct fg_chip *chip)
 			tmp[0], tmp[1], CC_CV_SETPOINT_REG);
 }
 
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+/*static void get_fg_battery_type(struct fg_chip *chip)
+{
+	int batt_id_kohm = 0;
+	int current_index = 0;
+	fg_batt_type =  batt_id_map[0].name;
+	
+	if(chip){
+		batt_id_kohm = get_sram_prop_now(chip, FG_DATA_BATT_ID);
+		while (current_index < ARRAY_SIZE(batt_id_map)) {
+			if ( (batt_id_map[current_index].id_min <= batt_id_kohm) 
+				&& (batt_id_kohm <= batt_id_map[current_index].id_max) ) {
+				fg_batt_type = batt_id_map[current_index].name;
+				break;
+			}
+			current_index++;
+		}
+	}
+       strncpy(chip->use_batt_type, fg_batt_type, sizeof(chip->use_batt_type));
+	pr_info("charger :jing fg_batt_type:%s--batt_id_kohm:%d \n",fg_batt_type,batt_id_kohm);
+}*/
+#endif
 #define CBITS_INPUT_FILTER_REG		0x4B4
 #define CBITS_RMEAS1_OFFSET		1
 #define CBITS_RMEAS2_OFFSET		2
@@ -6055,6 +6299,7 @@ static void discharge_gain_work(struct work_struct *work)
 }
 
 #define LOW_LATENCY			BIT(6)
+#define BATT_PROFILE_OFFSET		0x4C0
 #define PROFILE_INTEGRITY_REG		0x53C
 #define PROFILE_INTEGRITY_BIT		BIT(0)
 #define FIRST_EST_DONE_BIT		BIT(5)
@@ -6321,6 +6566,15 @@ static int fg_batt_profile_init(struct fg_chip *chip)
 	bool tried_again = false, vbat_in_range, profiles_same;
 	u8 reg = 0;
 
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	int debug_status = 0;
+	int warm_reboot = fg_is_warm_reboot(chip);
+	const char *battery_type_name,*old_batt_type;
+	const char *battery_type = NULL;
+#endif
+#ifdef CONFIG_NUBIA_WEIPU_CHARGER
+	fg_batt_type = "ascent_3450mah";
+#endif
 wait:
 	fg_stay_awake(&chip->profile_wakeup_source);
 	ret = wait_for_completion_interruptible_timeout(&chip->batt_id_avail,
@@ -6371,6 +6625,30 @@ wait:
 		}
 	}
 
+	#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	if (!profile_node) {
+		pr_err("couldn't find profile handle,use nubia default-batt-type\n");
+		if(!of_property_read_string(node, "nubia,use-default-batt-type", &battery_type_name)){
+			strncpy(chip->use_batt_type, battery_type_name, sizeof(chip->use_batt_type));
+                        fg_batt_type = chip->use_batt_type;
+
+			for_each_child_of_node(batt_node, node) {
+			  rc = of_property_read_string(node, "qcom,battery-type",
+					    &battery_type);
+			  if (!rc && strcmp(battery_type, fg_batt_type) == 0) {
+				  profile_node = node;
+				  break;
+			  }
+                     }
+                 }
+	}
+	if (!profile_node) {
+		pr_err("couldn't find profile handle\n");
+		old_batt_type = default_batt_type;
+		rc = -ENODATA;
+		goto fail;
+	}
+   #endif
 	/* read rslow compensation values if they're available */
 	rc = of_property_read_u32(profile_node, "qcom,chg-rs-to-rslow",
 					&chip->rslow_comp.chg_rs_to_rslow);
@@ -6462,11 +6740,42 @@ wait:
 		goto no_profile;
 	}
 
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	if(fg_debug_mask & FG_STATUS){
+		debug_status = 1;
+	}
+	if(debug_status == 0){
+		fg_debug_mask |= FG_STATUS;
+	} 
+	chip->batt_type = loading_batt_type;
+#endif
+	/* Check whether the charger is ready */
+	if (!is_charger_available(chip))
+		goto reschedule;
+
+	/* Disable charging for a FG cycle before calculating vbat_in_range */
+	if (!chip->charging_disabled) {
+		rc = set_prop_enable_charging(chip, false);
+		if (rc)
+			pr_err("Failed to disable charging, rc=%d\n", rc);
+
+		goto reschedule;
+	}
 
 	vbat_in_range = get_vbat_est_diff(chip)
 			< settings[FG_MEM_VBAT_EST_DIFF].value * 1000;
 	profiles_same = memcmp(chip->batt_profile, data,
 					PROFILE_COMPARE_LEN) == 0;
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	DBG_CHARGE("ocv=%d vbat=%d pvbat=%d diff=%d valid=%d psame=%d wboot=%d\n",
+		   fg_data[FG_DATA_OCV].value,
+		   fg_data[FG_DATA_VOLTAGE].value,
+		   fg_data[FG_DATA_CPRED_VOLTAGE].value,
+		   settings[FG_MEM_VBAT_EST_DIFF].value * 1000,
+		   vbat_in_range,
+		   profiles_same,
+		   warm_reboot); 
+#endif
 	if (reg & PROFILE_INTEGRITY_BIT) {
 		fg_cap_learning_load_data(chip);
 		if (vbat_in_range && !fg_is_batt_empty(chip) && profiles_same) {
@@ -6483,10 +6792,23 @@ wait:
 			goto done;
 		}
 	} else {
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+		if(warm_reboot > 0){
+			DBG_CHARGE("It is warm boot,skip battery check1.\n");
+			goto done;
+		}	
+#endif
 		pr_info("Battery profile not same, clearing data\n");
 		clear_cycle_counter(chip);
 		chip->learning_data.learned_cc_uah = 0;
 	}
+	
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	if(warm_reboot > 0){
+		DBG_CHARGE("It is warm boot,skip battery check2.\n");
+		goto done;
+	}	 
+#endif
 
 	if (fg_est_dump)
 		dump_sram(&chip->dump_sram);
@@ -6509,7 +6831,11 @@ wait:
 				chip->batt_profile, len, false);
 	}
 
+	if (chip->power_supply_registered)
+		power_supply_changed(&chip->bms_psy);
+
 	memcpy(chip->batt_profile, data, len);
+
 	chip->batt_profile_len = len;
 
 	if (fg_debug_mask & FG_STATUS)
@@ -6577,10 +6903,18 @@ done:
 
 	chip->first_profile_loaded = true;
 	chip->profile_loaded = true;
-	chip->soc_reporting_ready = true;
 	chip->battery_missing = is_battery_missing(chip);
 	update_chg_iterm(chip);
 	update_cc_cv_setpoint(chip);
+
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	//after chip->profile_loaded=true
+	ztemt_chg_batt_init(chip);
+
+	if(debug_status == 0)
+	fg_debug_mask &= ~FG_STATUS;
+#endif
+	
 	rc = populate_system_data(chip);
 	if (rc) {
 		pr_err("failed to read ocv properties=%d\n", rc);
@@ -6595,6 +6929,12 @@ done:
 		fg_data[FG_DATA_VOLTAGE].value);
 	complete_all(&chip->fg_reset_done);
 	return rc;
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+fail:
+	chip->batt_type = old_batt_type;
+	if (chip->power_supply_registered)
+		power_supply_changed(&chip->bms_psy);
+#endif
 no_profile:
 	chip->soc_reporting_ready = true;
 	if (chip->charging_disabled) {
@@ -6690,6 +7030,8 @@ static void sysfs_restart_work(struct work_struct *work)
 	mutex_unlock(&chip->sysfs_restart_lock);
 }
 
+#define SRAM_MONOTONIC_SOC_REG		0x574
+#define SRAM_MONOTONIC_SOC_OFFSET	2
 #define SRAM_RELEASE_TIMEOUT_MS		500
 static void charge_full_work(struct work_struct *work)
 {
@@ -7145,6 +7487,24 @@ static int fg_of_init(struct fg_chip *chip)
 				"qcom,cycle-counter-en");
 	if (chip->cyc_ctr.en)
 		chip->cyc_ctr.id = 1;
+	
+#ifdef CONFIG_ZTEMT_CHARGER
+	{
+		int i;
+           #if 0 
+	       const char *battery_type_name;	
+		if(!of_property_read_string(node, "qcom,use-batt-type", &battery_type_name)){
+			strncpy(chip->use_batt_type, battery_type_name, sizeof(chip->use_batt_type));
+    	              fg_batt_type = chip->use_batt_type;
+		}else
+			pr_err("fail to get qcom,use-batt-type\n");
+            #endif
+	  	for(i=0; i<FG_MEM_SETTING_MAX; i++)
+		    pr_info("settings[%d 0x%x %d] = %d\n",
+		           i,settings[i].address,settings[i].offset,settings[i].value);
+	}
+
+#endif
 
 	chip->esr_pulse_tune_en = of_property_read_bool(node,
 					"qcom,esr-pulse-tuning-en");
@@ -7331,6 +7691,7 @@ static int fg_init_irqs(struct fg_chip *chip)
 			}
 
 			enable_irq_wake(chip->soc_irq[DELTA_SOC].irq);
+			enable_irq_wake(chip->soc_irq[FULL_SOC].irq);
 			if (!chip->use_vbat_low_empty_soc)
 				enable_irq_wake(chip->soc_irq[EMPTY_SOC].irq);
 			break;
@@ -7994,16 +8355,157 @@ static int bcl_trim_workaround(struct fg_chip *chip)
 	return 0;
 }
 
-#define FG_ALG_SYSCTL_1			0x4B0
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+#define FG_WARM_RESET_TFT			BIT(4)
+static int fg_is_warm_reboot(struct fg_chip *chip)
+{
+	int rc = 0;
+	struct spmi_device *spmi = chip->spmi;
+	u8 warm_reboot1,warm_reboot2;
+
+	rc = spmi_ext_register_readl(spmi->ctrl, spmi->sid,	0x80a, &warm_reboot1, 1);
+	if (rc) {
+		pr_err("Unable to read addr=%x, rc(%d)\n",0x80a, rc);
+		return rc;
+	}
+
+	rc = spmi_ext_register_readl(spmi->ctrl, spmi->sid,	0x80b, &warm_reboot2, 1);
+	if (rc) {
+		pr_err("Unable to read addr=%x, rc(%d)\n",0x80b, rc);
+		return rc;
+	}
+
+	return warm_reboot1	|| (warm_reboot2 & FG_WARM_RESET_TFT);
+}
+
+static int ztemt_chg_get_fg_soc(struct nubia_fg_cntl *batt_cntl, int *batt_soc)
+{
+	struct nubia_fg_params *pbatt = &batt_cntl->batt_data;
+	struct fg_chip *chip = (struct fg_chip *)batt_cntl->fg_pri_data;
+	static int i = 0;
+	
+	*batt_soc = get_prop_capacity(chip);
+	
+	if((pbatt->batt_soc==100)&&(*batt_soc==99)&&(b_powerOn_init))
+	{
+			i++;
+		  pr_err("BATT:CHG ztemt_chg_get_fg_soc pbatt->batt_soc=%d,*batt_soc=%d, i=%d, b_powerOn_init=%d \n",pbatt->batt_soc, *batt_soc, i, b_powerOn_init);
+		  *batt_soc=100;
+			if(i>4)
+			{
+         b_powerOn_init = false;
+         i=0;
+      }
+	}
+
+	return  0;
+}
+
+static int ztemt_chg_print_info(struct nubia_fg_cntl *batt_cntl)
+{
+	struct nubia_fg_params *pbatt = &batt_cntl->batt_data;
+	struct fg_chip *chip = (struct fg_chip *)batt_cntl->fg_pri_data;
+	int msoc;
+	int rc;
+
+	msoc = get_sram_prop_now(chip, FG_DATA_BATT_SOC);
+
+	pr_err("BATT:CHG bsoc=%d fgsoc=%d msoc=%d T=%d mA=%d mV=%d U=%d St=%d\n",
+	  pbatt->batt_soc,pbatt->fg_soc,msoc,pbatt->batt_temp,pbatt->batt_ma,
+	  pbatt->batt_mv,pbatt->usb_in,pbatt->batt_status);
+
+	if(chip->chg_full_st 
+		   && ((msoc<9800 && chip->status == POWER_SUPPLY_STATUS_CHARGING) || msoc<9600))
+		chip->chg_full_st = 0;
+
+	if((msoc < 9900 || pbatt->batt_mv < 4350) 
+	  && pbatt->usb_in && pbatt->batt_status == POWER_SUPPLY_STATUS_FULL){
+		rc = set_prop_enable_charging(chip, false);
+		if (rc) {
+			pr_err("failed to disable charging %d\n", rc);
+			return rc;
+		}
+
+		mdelay(10);
+
+		rc = set_prop_enable_charging(chip, true);
+		if (rc) {
+			pr_err("failed to enable charging %d\n", rc);
+			return rc;
+		}
+		DBG_CHARGE("msoc is low, do recharging...\n");
+	}
+
+	return 0;
+}
+
+static int ztemt_chg_batt_init(struct fg_chip *chip)
+{
+	struct nubia_fg_cntl *batt_cntl;
+	int rc;
+	s64 soc_raw;
+	int msoc;
+	int fgsoc;
+
+	batt_cntl = kzalloc(sizeof(*batt_cntl), GFP_KERNEL);
+	if (!batt_cntl) {
+		pr_err("Couldn't allocate memory\n");
+		return -ENOMEM;
+	}
+
+	chip->batt_cntl = batt_cntl;
+
+	//--Part start. These  datas must be inited.
+	/**  fg_pri_data  **/
+	batt_cntl->fg_pri_data = chip;
+	/**  nubia_print_info  **/
+	batt_cntl->nubia_print_info = ztemt_chg_print_info;
+	/**  nubia_get_soc  **/
+	batt_cntl->nubia_get_soc = ztemt_chg_get_fg_soc;
+	/**  init  batt_soc  **/
+	fgsoc = get_prop_capacity(chip);
+
+	soc_raw = get_battery_soc_raw(chip);
+	msoc = div64_s64(soc_raw * 10000, FULL_PERCENT_3B);
+		
+	if(chip->profile_loaded){
+		batt_cntl->batt_data.batt_soc = fgsoc;
+	}else{
+		if(msoc > 9950)
+			batt_cntl->batt_data.batt_soc = FULL_CAPACITY;
+		else
+			batt_cntl->batt_data.batt_soc = msoc / 100;
+	}
+	//--Part end. 
+
+	DBG_CHARGE("get init msoc=%d fgsoc=%d sram_soc=%d\n", msoc, fgsoc,batt_cntl->batt_data.batt_soc);
+
+	batt_cntl->support_backup = 0;
+		
+       rc = nubia_batt_cntl_init(batt_cntl);
+	if (rc) {
+		pr_err("Couldn't nubia_chg_cntl_init\n");
+		return -EINVAL;
+	}
+
+    return 0;
+}
+
+#endif
+
+#define FG_ALG_SYSCTL_1	0x4B0
+#define SOC_CNFG	0x450
+#define SOC_DELTA_OFFSET	3
+#define DELTA_SOC_PERCENT	1
+#define I_TERM_QUAL_BIT		BIT(1)
+#define PATCH_NEG_CURRENT_BIT	BIT(3)
 #define KI_COEFF_PRED_FULL_ADDR		0x408
-#define TEMP_FRAC_SHIFT_REG		0x4A4
-#define FG_ADC_CONFIG_REG		0x4B8
 #define KI_COEFF_PRED_FULL_4_0_MSB	0x88
 #define KI_COEFF_PRED_FULL_4_0_LSB	0x00
+#define TEMP_FRAC_SHIFT_REG		0x4A4
+#define FG_ADC_CONFIG_REG		0x4B8
 #define FG_BCL_CONFIG_OFFSET		0x3
 #define ALERT_CFG_OFFSET		3
-#define I_TERM_QUAL_BIT			BIT(1)
-#define PATCH_NEG_CURRENT_BIT		BIT(3)
 #define BCL_FORCED_HPM_IN_CHARGE	BIT(2)
 #define IRQ_USE_VOLTAGE_HYST_BIT	BIT(0)
 #define EMPTY_FROM_VOLTAGE_BIT		BIT(1)
@@ -8362,6 +8864,45 @@ static int fg_init_iadc_config(struct fg_chip *chip)
 	return 0;
 }
 
+static void fg_restore_cc_soc(struct fg_chip *chip)
+{
+	int rc;
+
+	if (!chip->use_last_cc_soc || !chip->last_cc_soc)
+		return;
+
+	if (fg_debug_mask & FG_STATUS)
+		pr_info("Restoring cc_soc: %lld\n", chip->last_cc_soc);
+
+	rc = fg_mem_write(chip, (u8 *)&chip->last_cc_soc,
+			fg_data[FG_DATA_CC_CHARGE].address, 4,
+			fg_data[FG_DATA_CC_CHARGE].offset, 0);
+	if (rc)
+		pr_err("failed to update CC_SOC rc=%d\n", rc);
+	else
+		chip->use_last_cc_soc = false;
+}
+
+static void fg_restore_soc(struct fg_chip *chip)
+{
+	int rc;
+	u16 msoc;
+
+	if (chip->use_last_soc && chip->last_soc)
+		msoc = DIV_ROUND_CLOSEST(chip->last_soc * 0xFFFF,
+				FULL_SOC_RAW);
+	else
+		return;
+
+	if (fg_debug_mask & FG_STATUS)
+		pr_info("Restored soc: %d\n", msoc);
+
+	rc = fg_mem_write(chip, (u8 *)&msoc, SRAM_MONOTONIC_SOC_REG, 2,
+			SRAM_MONOTONIC_SOC_OFFSET, 0);
+	if (rc)
+		pr_err("failed to write M_SOC_REG rc=%d\n", rc);
+}
+
 #define EN_WR_FGXCT_PRD		BIT(6)
 #define EN_RD_FGXCT_PRD		BIT(5)
 #define FG_RESTART_TIMEOUT_MS	12000
@@ -8676,6 +9217,17 @@ static void delayed_init_work(struct work_struct *work)
 	chip->otg_present = is_otg_present(chip);
 	chip->init_done = true;
 	pr_debug("FG: HW_init success\n");
+
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	{
+	    int i;
+		for(i=0; i<FG_DATA_MAX; i++)
+			if (fg_debug_mask & FG_STATUS)
+				pr_info("fg_data[%d 0x%x %d] = %d\n", 
+				    i, fg_data[i].address, fg_data[i].offset,fg_data[i].value);
+	}
+#endif
+
 	return;
 done:
 	fg_cleanup(chip);
@@ -8705,6 +9257,10 @@ static int fg_probe(struct spmi_device *spmi)
 		pr_err("Can't allocate fg_chip\n");
 		return -ENOMEM;
 	}
+	
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	b_powerOn_init = true;
+#endif		
 
 	chip->spmi = spmi;
 	chip->dev = &(spmi->dev);
@@ -8986,7 +9542,17 @@ static void check_and_update_sram_data(struct fg_chip *chip)
 static int fg_suspend(struct device *dev)
 {
 	struct fg_chip *chip = dev_get_drvdata(dev);
-
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+        static int i = 0;
+		i++;
+		pr_err("BATT:CHG fg_suspend i=%d \n", i);
+	  if(i>3)
+		{
+       b_powerOn_init = false;
+       i=0;
+    }
+    nubia_batt_suspend(chip->batt_cntl);
+#endif
 	if (!chip->sw_rbias_ctrl)
 		return 0;
 
@@ -9000,6 +9566,9 @@ static int fg_resume(struct device *dev)
 {
 	struct fg_chip *chip = dev_get_drvdata(dev);
 
+#ifdef CONFIG_ZTEMT_FUEL_GAUGE
+	nubia_batt_resume(chip->batt_cntl);
+#endif
 	if (!chip->sw_rbias_ctrl)
 		return 0;
 

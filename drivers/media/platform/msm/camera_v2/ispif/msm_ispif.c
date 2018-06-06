@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -47,7 +47,7 @@
 
 #define ISPIF_TIMEOUT_SLEEP_US                1000
 #define ISPIF_TIMEOUT_ALL_US               1000000
-#define ISPIF_SOF_DEBUG_COUNT                   0
+#define ISPIF_SOF_DEBUG_COUNT                   5
 
 /* 3D Threshold value according guidelines for line width 1280 */
 #define STEREO_DEFAULT_3D_THRESHOLD           0x36
@@ -894,6 +894,7 @@ static int msm_ispif_config(struct ispif_device *ispif,
 	enum msm_ispif_vfe_intf vfe_intf;
 	struct msm_ispif_param_data_ext *params =
 		(struct msm_ispif_param_data_ext *)data;
+
 
 	BUG_ON(!ispif);
 	BUG_ON(!params);
@@ -1811,6 +1812,9 @@ static long msm_ispif_dispatch_cmd(enum ispif_cfg_type_t cmd,
 				struct msm_ispif_param_data_ext *params)
 {
 	long rc = 0;
+	struct ispif_cfg_data *pcdata = (struct ispif_cfg_data *)arg;
+	struct ispif_device *ispif =
+		(struct ispif_device *)v4l2_get_subdevdata(sd);
 
 	switch (cmd) {
 	case ISPIF_CFG:
@@ -1825,6 +1829,7 @@ static long msm_ispif_dispatch_cmd(enum ispif_cfg_type_t cmd,
 		rc = msm_ispif_restart_frame_boundary(ispif, params);
 		msm_ispif_io_dump_reg(ispif);
 		break;
+
 	case ISPIF_STOP_FRAME_BOUNDARY:
 		rc = msm_ispif_stop_frame_boundary(ispif, params);
 		msm_ispif_io_dump_reg(ispif);
@@ -1961,6 +1966,9 @@ static int ispif_open_node(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 		rc = msm_ispif_clk_ahb_enable(ispif, 1);
 		if (rc)
 			goto ahb_clk_enable_fail;
+		rc = msm_camera_enable_irq(ispif->irq, 1);
+		if (rc)
+			goto irq_enable_fail;
 	}
 	/* mem remap is done in init when the clock is on */
 	ispif->open_cnt++;
@@ -1968,6 +1976,8 @@ static int ispif_open_node(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	return rc;
 ahb_clk_enable_fail:
 	msm_ispif_set_regulators(ispif->ispif_vdd, ispif->ispif_vdd_count, 0);
+irq_enable_fail:
+	msm_ispif_clk_ahb_enable(ispif, 0);
 unlock:
 	mutex_unlock(&ispif->mutex);
 	return rc;

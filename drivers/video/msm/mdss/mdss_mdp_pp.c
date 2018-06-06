@@ -638,6 +638,7 @@ inline int linear_map(int in, int *out, int in_max, int out_max)
  */
 static inline struct mdss_mdp_pipe *__get_hist_pipe(int pnum)
 {
+	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
 	enum mdss_mdp_pipe_type ptype;
 
 	ptype = get_pipe_type_from_num(pnum);
@@ -1301,6 +1302,13 @@ static int mdss_mdp_qseed2_setup(struct mdss_mdp_pipe *pipe)
 	pr_debug("pipe=%d, change pxl ext=%d\n", pipe->num,
 			pipe->scaler.enable);
 	mdata = mdss_mdp_get_mdata();
+
+	mdss_mdp_pp_get_dcm_state(pipe, &dcm_state);
+
+	if (mdata->mdp_rev >= MDSS_MDP_HW_REV_102 && pipe->src_fmt->is_yuv)
+		filter_mode = MDSS_MDP_SCALE_FILTER_CA;
+	else
+		filter_mode = MDSS_MDP_SCALE_FILTER_BIL;
 
 	if (pipe->type == MDSS_MDP_PIPE_TYPE_DMA ||
 	    pipe->type == MDSS_MDP_PIPE_TYPE_CURSOR) {
@@ -2191,6 +2199,7 @@ static int pp_hist_setup(u32 *op, u32 block, struct mdss_mdp_mixer *mix,
 
 	spin_unlock_irqrestore(&hist_info->hist_lock, flag);
 	mutex_unlock(&hist_info->hist_mutex);
+	ret = 0;
 error:
 	return ret;
 }
@@ -2333,6 +2342,9 @@ static int pp_dspp_setup(u32 disp_num, struct mdss_mdp_mixer *mixer)
 			(pp_driver_ops.gamut_clk_gate_en))
 		pp_driver_ops.gamut_clk_gate_en(base +
 					mdata->pp_block_off.dspp_gamut_off);
+	ret = pp_hist_setup(&opmode, MDSS_PP_DSPP_CFG | dspp_num, mixer);
+	if (ret)
+		goto dspp_exit;
 
 	if (disp_num < MDSS_BLOCK_DISP_NUM) {
 		pp_sts = &mdss_pp_res->pp_disp_sts[disp_num];
@@ -2361,6 +2373,9 @@ static int pp_dspp_setup(u32 disp_num, struct mdss_mdp_mixer *mixer)
 	/* nothing to update */
 	if ((!flags) && (!(opmode)) && (!ad_flags))
 		goto dspp_exit;
+
+	pp_sts = &mdss_pp_res->pp_disp_sts[disp_num];
+	pp_sts->side_sts = side;
 
 	if (flags & PP_FLAGS_DIRTY_PA) {
 		if (!pp_ops[PA].pp_set_config) {
@@ -3166,6 +3181,7 @@ static int pp_ad_calc_bl(struct msm_fb_data_type *mfd, int bl_in, int *bl_out,
 		ad_bl_out = temp;
 	}
 
+	*bl_out = temp;
 	if (pp_ad_bl_threshold_check(ad->init.al_thresh, ad->init.alpha_base,
 					ad->last_bl, ad_bl_out)) {
 		mfd->ad_bl_level = ad_bl_out;
@@ -4450,9 +4466,16 @@ static int mdss_mdp_panel_default_dither_config(struct msm_fb_data_type *mfd,
 			}
 			break;
 		default:
+			dither.g_y_depth = 2;
+			dither.r_cr_depth = 2;
+			dither.b_cb_depth = 2;
 			dither.cfg_payload = NULL;
 			break;
 		}
+		break;
+	default:
+		dither.cfg_payload = NULL;
+		break;
 	}
 	ret = mdss_mdp_dither_config(mfd, &dither, NULL, true);
 	if (ret)
@@ -6005,6 +6028,7 @@ static void pp_ad_init_write(struct mdss_mdp_ad *ad_hw, struct mdss_ad_info *ad,
 			cfg_buf_mode = 0x2;
 		}
 
+
 		writel_relaxed(frame_start, base + MDSS_MDP_REG_AD_FRAME_START);
 		writel_relaxed(frame_end, base + MDSS_MDP_REG_AD_FRAME_END);
 		writel_relaxed(procs_start, base + MDSS_MDP_REG_AD_PROCS_START);
@@ -6395,6 +6419,11 @@ static void pp_ad_calc_worker(struct work_struct *work)
 	if ((PP_AD_STATE_RUN & ad->state) && ad->calc_itr > 0)
 		ad->calc_itr--;
 
+	mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_ON);
+	ad->last_str = 0xFF & readl_relaxed(base + MDSS_MDP_REG_AD_STR_OUT);
+	mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_OFF);
+	if (mdata->ad_debugen)
+		pr_debug("itr number %d str %d\n", ad->calc_itr, ad->last_str);
 	mdp5_data->ad_events++;
 	sysfs_notify_dirent(mdp5_data->ad_event_sd);
 	if (!ad->calc_itr) {
@@ -7451,6 +7480,7 @@ static int pp_mfd_ad_release_all(struct msm_fb_data_type *mfd)
 	ad->state = 0;
 	mutex_unlock(&ad->lock);
 	cancel_work_sync(&ad->calc_work);
+	mutex_unlock(&ad->lock);
 
 	ctl = mfd_to_ctl(mfd);
 	if (ctl && ctl->ops.remove_vsync_handler)

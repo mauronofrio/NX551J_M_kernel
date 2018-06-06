@@ -14,7 +14,6 @@
 &int_codec {
 	status = "okay";
 	qcom,model = "msm8953-snd-card-mtp";
-	qcom,msm-hs-micbias-type = "internal";
 };
 
 &pm8953_diangu_dig {
@@ -25,6 +24,7 @@
 	status = "okay";
 };
 
+<<<<<<< HEAD
 &wsa881x_i2c_f {
 	status = "okay";
 };
@@ -32,3 +32,5 @@
 &wsa881x_i2c_45 {
 	status = "okay";
 };
+=======
+>>>>>>> 612df5e... Nubia NX543, NX549, NX551 code rebased on top of caf source
